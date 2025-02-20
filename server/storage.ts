@@ -1,37 +1,51 @@
-import { type Series, type InsertSeries, type Episode, type InsertEpisode, type User, type InsertUser } from "@shared/schema";
-import { series, episodes, users } from "@shared/schema";
+import { series, episodes, users, notifications, type Series, type Episode, type InsertSeries, type InsertEpisode, type User, type InsertUser, type Notification, type InsertNotification } from "@shared/schema";
 import { db } from "./db";
-import { eq } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
+import session from "express-session";
+import connectPg from "connect-pg-simple";
+import { pool } from "./db";
+
+const PostgresSessionStore = connectPg(session);
 
 export interface IStorage {
   // User management
-  getAllUsers(): Promise<User[]>;
   getUser(id: number): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
-  updateUserStatus(id: number, status: string): Promise<User | undefined>;
-  updateUserRole(id: number, isAdmin: boolean): Promise<User | undefined>;
 
   // Series management
   getAllSeries(): Promise<Series[]>;
-  getSeries(id: number): Promise<Series | undefined>;
-  createSeries(series: InsertSeries, userId: number): Promise<Series>;
-  updateSeriesStatus(id: number, status: string, userId: number): Promise<Series | undefined>;
+  getSeriesById(id: number): Promise<Series | undefined>;
+  createSeries(series: InsertSeries): Promise<Series>;
+  deleteSeries(id: number): Promise<void>;
 
   // Episode management
-  getEpisodes(seriesId: number): Promise<Episode[]>;
-  getAllEpisodes(): Promise<Episode[]>;
-  getEpisode(id: number): Promise<Episode | undefined>;
-  createEpisode(episode: InsertEpisode, userId: number): Promise<Episode>;
-  updateEpisodeStatus(id: number, status: string, userId: number): Promise<Episode | undefined>;
+  getEpisodesBySeriesId(seriesId: number): Promise<Episode[]>;
+  getEpisodeById(id: number): Promise<Episode | undefined>;
+  createEpisode(episode: InsertEpisode): Promise<Episode>;
+  deleteEpisode(id: number): Promise<void>;
+
+  // Session store
+  sessionStore: session.Store;
+
+  // Notification management
+  createNotification(notification: InsertNotification): Promise<Notification>;
+  getNotifications(): Promise<Notification[]>;
+  markNotificationAsRead(id: number): Promise<void>;
+  deleteNotification(id: number): Promise<void>;
 }
 
 export class DatabaseStorage implements IStorage {
-  // User management
-  async getAllUsers(): Promise<User[]> {
-    return await db.select().from(users);
+  sessionStore: session.Store;
+
+  constructor() {
+    this.sessionStore = new PostgresSessionStore({
+      pool,
+      createTableIfMissing: true,
+    });
   }
 
+  // User management
   async getUser(id: number): Promise<User | undefined> {
     const [user] = await db.select().from(users).where(eq(users.id, id));
     return user;
@@ -42,33 +56,9 @@ export class DatabaseStorage implements IStorage {
     return user;
   }
 
-  async createUser(user: InsertUser): Promise<User> {
-    const [newUser] = await db.insert(users).values(user).returning();
-    return newUser;
-  }
-
-  async updateUserStatus(id: number, status: string): Promise<User | undefined> {
-    const [updatedUser] = await db
-      .update(users)
-      .set({ 
-        status, 
-        updated: new Date().toISOString()
-      })
-      .where(eq(users.id, id))
-      .returning();
-    return updatedUser;
-  }
-
-  async updateUserRole(id: number, isAdmin: boolean): Promise<User | undefined> {
-    const [updatedUser] = await db
-      .update(users)
-      .set({ 
-        isAdmin, 
-        updated: new Date().toISOString()
-      })
-      .where(eq(users.id, id))
-      .returning();
-    return updatedUser;
+  async createUser(insertUser: InsertUser): Promise<User> {
+    const [user] = await db.insert(users).values(insertUser).returning();
+    return user;
   }
 
   // Series management
@@ -76,115 +66,68 @@ export class DatabaseStorage implements IStorage {
     return await db.select().from(series);
   }
 
-  async getSeries(id: number): Promise<Series | undefined> {
+  async getSeriesById(id: number): Promise<Series | undefined> {
     const [result] = await db.select().from(series).where(eq(series.id, id));
     return result;
   }
 
-  async createSeries(data: InsertSeries, userId: number): Promise<Series> {
-    const [newSeries] = await db
-      .insert(series)
-      .values({
-        ...data,
-        createdBy: userId,
-        updatedBy: userId,
-      })
-      .returning();
-    return newSeries;
+  async createSeries(insertSeries: InsertSeries): Promise<Series> {
+    const [result] = await db.insert(series).values(insertSeries).returning();
+    return result;
   }
 
-  async updateSeriesStatus(id: number, status: string, userId: number): Promise<Series | undefined> {
-    const [updatedSeries] = await db
-      .update(series)
-      .set({ 
-        status, 
-        updatedBy: userId,
-        updated: new Date().toISOString()
-      })
-      .where(eq(series.id, id))
-      .returning();
-    return updatedSeries;
+  async deleteSeries(id: number): Promise<void> {
+    await db.delete(series).where(eq(series.id, id));
+    // Delete associated episodes
+    await db.delete(episodes).where(eq(episodes.seriesId, id));
   }
 
   // Episode management
-  async getEpisodes(seriesId: number): Promise<Episode[]> {
-    return await db.select().from(episodes).where(eq(episodes.seriesId, seriesId));
+  async getEpisodesBySeriesId(seriesId: number): Promise<Episode[]> {
+    return await db
+      .select()
+      .from(episodes)
+      .where(eq(episodes.seriesId, seriesId))
+      .orderBy(episodes.episodeNumber);
   }
 
-  async getAllEpisodes(): Promise<Episode[]> {
-    return await db.select().from(episodes);
-  }
-
-  async getEpisode(id: number): Promise<Episode | undefined> {
+  async getEpisodeById(id: number): Promise<Episode | undefined> {
     const [result] = await db.select().from(episodes).where(eq(episodes.id, id));
     return result;
   }
 
-  async createEpisode(data: InsertEpisode, userId: number): Promise<Episode> {
-    const [newEpisode] = await db
-      .insert(episodes)
-      .values({
-        ...data,
-        createdBy: userId,
-        updatedBy: userId,
-      })
-      .returning();
-    return newEpisode;
+  async createEpisode(insertEpisode: InsertEpisode): Promise<Episode> {
+    const [result] = await db.insert(episodes).values(insertEpisode).returning();
+    return result;
   }
 
-  async updateEpisodeStatus(id: number, status: string, userId: number): Promise<Episode | undefined> {
-    const [updatedEpisode] = await db
-      .update(episodes)
-      .set({ 
-        status, 
-        updatedBy: userId,
-        updated: new Date().toISOString()
-      })
-      .where(eq(episodes.id, id))
-      .returning();
-    return updatedEpisode;
+  async deleteEpisode(id: number): Promise<void> {
+    await db.delete(episodes).where(eq(episodes.id, id));
   }
 
-  // Initialize with mock data
-  async initializeMockData() {
-    const mockSeries: InsertSeries[] = [
-      {
-        title: "Spirit Blade",
-        description: "A young warrior discovers ancient powers through a mystical sword.",
-        poster: "https://images.unsplash.com/photo-1601850494422-3cf14624b0b3",
-        banner: "https://images.unsplash.com/photo-1558770147-a0e2842c5ea1",
-        genre: "Action"
-      },
-      {
-        title: "Cyber Academy",
-        description: "Students at a futuristic academy learn to harness digital powers.",
-        poster: "https://images.unsplash.com/photo-1625189659340-887baac3ea32",
-        banner: "https://images.unsplash.com/photo-1558770147-68c0607adb26",
-        genre: "Sci-Fi"
-      }
-    ];
+  // Notification methods
+  async createNotification(notification: InsertNotification): Promise<Notification> {
+    const [result] = await db.insert(notifications).values(notification).returning();
+    return result;
+  }
 
-    // Insert series
-    for (const seriesData of mockSeries) {
-      const [insertedSeries] = await db.insert(series).values(seriesData).returning();
+  async getNotifications(): Promise<Notification[]> {
+    return await db
+      .select()
+      .from(notifications)
+      .orderBy(desc(notifications.createdAt));
+  }
 
-      // Add episodes for each series
-      for (let epNum = 1; epNum <= 12; epNum++) {
-        const episodeData: InsertEpisode = {
-          seriesId: insertedSeries.id,
-          title: `Episode ${epNum}`,
-          number: epNum,
-          videoUrl: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
-        };
-        await db.insert(episodes).values(episodeData);
-      }
-    }
+  async markNotificationAsRead(id: number): Promise<void> {
+    await db
+      .update(notifications)
+      .set({ isRead: true })
+      .where(eq(notifications.id, id));
+  }
+
+  async deleteNotification(id: number): Promise<void> {
+    await db.delete(notifications).where(eq(notifications.id, id));
   }
 }
 
 export const storage = new DatabaseStorage();
-
-// Initialize mock data only in development
-if (process.env.NODE_ENV !== 'production') {
-  storage.initializeMockData().catch(console.error);
-}
