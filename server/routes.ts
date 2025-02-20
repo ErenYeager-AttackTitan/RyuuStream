@@ -30,4 +30,84 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.delete("/api/series/:id", async (req, res) => {
     if (!req.isAuthenticated() || !req.user.isAdmin) {
       return res.status(403).json({ message: "Admin access required" });
-      
+    }
+    await storage.deleteSeries(parseInt(req.params.id));
+    res.sendStatus(200);
+  });
+
+  // Episode routes
+  app.get("/api/series/:id/episodes", async (req, res) => {
+    const episodes = await storage.getEpisodesBySeriesId(parseInt(req.params.id));
+    res.json(episodes);
+  });
+
+  app.get("/api/episodes/:id", async (req, res) => {
+    const episode = await storage.getEpisodeById(parseInt(req.params.id));
+    if (!episode) return res.sendStatus(404);
+    res.json(episode);
+  });
+
+  app.post("/api/episodes", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+    const parsed = insertEpisodeSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(parsed.error);
+    const episode = await storage.createEpisode(parsed.data);
+    res.status(201).json(episode);
+  });
+
+  app.delete("/api/episodes/:id", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+    await storage.deleteEpisode(parseInt(req.params.id));
+    res.sendStatus(200);
+  });
+
+  // Add these routes after the existing episode routes
+  app.get("/api/notifications", async (req, res) => {
+    const notifications = await storage.getNotifications();
+    res.json(notifications);
+  });
+
+  app.post("/api/notifications", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+    const parsed = insertNotificationSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(parsed.error);
+    const notification = await storage.createNotification(parsed.data);
+    res.status(201).json(notification);
+  });
+
+  app.post("/api/notifications/:id/read", async (req, res) => {
+    await storage.markNotificationAsRead(parseInt(req.params.id));
+    res.sendStatus(200);
+  });
+
+  app.delete("/api/notifications/:id", async (req, res) => {
+    if (!req.isAuthenticated() || !req.user.isAdmin) {
+      return res.status(403).json({ message: "Admin access required" });
+    }
+    await storage.deleteNotification(parseInt(req.params.id));
+    res.sendStatus(200);
+  });
+
+  // Secret notification push endpoint with API key authentication
+  const API_KEY = process.env.NOTIFICATION_API_KEY || "dev-api-key";
+  app.post("/api/notifications/push", async (req, res) => {
+    const providedKey = req.headers["x-api-key"];
+    if (providedKey !== API_KEY) {
+      return res.status(403).json({ message: "Invalid API key" });
+    }
+
+    const parsed = insertNotificationSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json(parsed.error);
+    const notification = await storage.createNotification(parsed.data);
+    res.status(201).json(notification);
+  });
+
+  const httpServer = createServer(app);
+  return httpServer;
+    }
